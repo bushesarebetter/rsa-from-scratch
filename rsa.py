@@ -99,17 +99,78 @@ def decrypt(ct, priv):
 
 
 # signature block: 00 01 FF..FF 00 sha256(msg)
+def _sig_block(msg, k):
+    h = hashlib.sha256(msg).digest()
+    return b"\x00\x01" + b"\xff" * (k - 3 - len(h)) + b"\x00" + h
 
 
+def sign(msg, priv):
+    n, d = priv
+    k = byte_len(n)
+    return pow(int.from_bytes(_sig_block(msg, k), "big"), d, n).to_bytes(k, "big")
 
 
+def verify(msg, sig, pub):
+    n, e = pub
+    k = byte_len(n)
+    return pow(int.from_bytes(sig, "big"), e, n).to_bytes(k, "big") == _sig_block(msg, k)
 
 
+def weak_keygen(bits=1024):
+    # private exponent well below n^(1/4)/3, which is what Wiener's attack needs
+    p, q = random_prime(bits // 2), random_prime(bits // 2)
+    n, phi = p * q, (p - 1) * (q - 1)
+    while True:
+        d = secrets.randbits(bits // 4 - 4) | 1
+        if math.gcd(d, phi) == 1:
+            return (n, modinv(d, phi)), (n, d)
 
 
+def convergents(num, den):
+    h0, h1, k0, k1 = 0, 1, 1, 0
+    while den:
+        a = num // den
+        num, den = den, num - a * den
+        h0, h1 = h1, a * h1 + h0
+        k0, k1 = k1, a * k1 + k0
+        yield h1, k1
 
 
+def wiener(pub):
+    # some convergent k/d of e/n equals k/d from e*d = 1 + k*phi; test each by
+    # checking that the implied phi gives integer roots p, q of x^2 - (n - phi + 1)x + n
+    n, e = pub
+    for k, d in convergents(e, n):
+        if k == 0 or (e * d - 1) % k:
+            continue
+        phi = (e * d - 1) // k
+        b = n - phi + 1
+        disc = b * b - 4 * n
+        if disc >= 0 and math.isqrt(disc) ** 2 == disc and (b + math.isqrt(disc)) % 2 == 0:
+            return d
+    return None
 
 
+def main():
+    pub, priv = keygen(1024)
+    print(f"n = {pub[0]:#x}"[:60] + "...")
+    m = 42424242
+    c = encrypt_int(m, pub)
+    print(f"integer roundtrip: {m} -> {decrypt_int(c, priv)}")
+
+    msg = b"attack at dawn"
+    ct = encrypt(msg, pub)
+    print(f"bytes roundtrip:   {msg!r} -> {decrypt(ct, priv)!r}")
+
+    sig = sign(msg, priv)
+    print(f"verify original:   {verify(msg, sig, pub)}")
+    print(f"verify tampered:   {verify(b'attack at dusk', sig, pub)}")
+
+    wpub, wpriv = weak_keygen(1024)
+    d = wiener(wpub)
+    print(f"Wiener: weak d has {wpriv[1].bit_length()} bits, recovered = {d == wpriv[1]}")
+    print(f"Wiener on the normal key: {wiener(pub)}")
 
 
+if __name__ == "__main__":
+    main()
